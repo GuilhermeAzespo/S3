@@ -42,80 +42,63 @@ router.get('/bucket/:bucketId', requireAuth, async (req, res) => {
   }
 });
 
-// Upload de múltiplos objetos (arquivos e pastas)
-router.post('/bucket/:bucketId/upload', requireAuth, upload.array('files', 500), async (req, res) => {
+// Upload de objeto (um arquivo por request — o frontend chama N vezes em paralelo)
+router.post('/bucket/:bucketId/upload', requireAuth, upload.single('file'), async (req, res) => {
   try {
     const { bucketId } = req.params;
-    const files = req.files as Express.Multer.File[];
-    // keys enviados pelo frontend como JSON array ou campo repetido
-    let keys: string[] = [];
-    if (req.body.keys) {
-      keys = Array.isArray(req.body.keys) ? req.body.keys : JSON.parse(req.body.keys);
+    const { key } = req.body;
+    const file = req.file;
+
+    if (!file || !key) {
+      return res.status(400).json({ error: 'File and key are required' });
     }
 
-    if (!files || files.length === 0) {
-      return res.status(400).json({ error: 'No files provided' });
-    }
-
-    // Verificar Cota global do bucket
     const bucket = await prisma.bucket.findUnique({ where: { id: bucketId } });
     if (!bucket) {
-      for (const f of files) { try { fs.unlinkSync(f.path); } catch (e) {} }
+      try { fs.unlinkSync(file.path); } catch (e) {}
       return res.status(404).json({ error: 'Bucket not found' });
     }
 
     if (bucket.quotaBytes) {
       const agg = await prisma.object.aggregate({ where: { bucketId }, _sum: { sizeBytes: true } });
       const currentSize = Number(agg._sum.sizeBytes) || 0;
-      const uploadSize = files.reduce((acc, f) => acc + f.size, 0);
-      if (currentSize + uploadSize > Number(bucket.quotaBytes)) {
-        for (const f of files) { try { fs.unlinkSync(f.path); } catch (e) {} }
+      if (currentSize + file.size > Number(bucket.quotaBytes)) {
+        try { fs.unlinkSync(file.path); } catch (e) {}
         return res.status(400).json({ error: 'Bucket quota exceeded' });
       }
     }
 
-    // Verificar Regras de Lifecycle
     const rules = await prisma.lifecycleRule.findMany({ where: { bucketId } });
-
-    const saved = [];
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      const key  = keys[i] || file.originalname;
-
-      let expiresAt: Date | null = null;
-      for (const rule of rules) {
-        if (!rule.prefix || key.startsWith(rule.prefix)) {
-          expiresAt = new Date();
-          expiresAt.setDate(expiresAt.getDate() + rule.daysToLive);
-          break;
-        }
+    let expiresAt: Date | null = null;
+    for (const rule of rules) {
+      if (!rule.prefix || key.startsWith(rule.prefix)) {
+        expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + rule.daysToLive);
+        break;
       }
-
-      // Substituir se já existe
-      const existing = await prisma.object.findUnique({ where: { bucketId_key: { bucketId, key } } });
-      if (existing) {
-        const oldPath = path.join(STORAGE_PATH, bucketId, existing.id);
-        if (fs.existsSync(oldPath)) { try { fs.unlinkSync(oldPath); } catch (e) {} }
-        await prisma.object.delete({ where: { id: existing.id } });
-      }
-
-      const savedObj = await prisma.object.create({
-        data: { bucketId, key, sizeBytes: file.size, mimeType: file.mimetype, expiresAt }
-      });
-
-      const finalPath = path.join(STORAGE_PATH, bucketId, savedObj.id);
-      fs.renameSync(file.path, finalPath);
-      saved.push(savedObj);
     }
 
-    res.json(saved);
+    const existing = await prisma.object.findUnique({ where: { bucketId_key: { bucketId, key } } });
+    if (existing) {
+      const oldPath = path.join(STORAGE_PATH, bucketId, existing.id);
+      if (fs.existsSync(oldPath)) { try { fs.unlinkSync(oldPath); } catch (e) {} }
+      await prisma.object.delete({ where: { id: existing.id } });
+    }
+
+    const savedObj = await prisma.object.create({
+      data: { bucketId, key, sizeBytes: file.size, mimeType: file.mimetype, expiresAt }
+    });
+
+    const finalPath = path.join(STORAGE_PATH, bucketId, savedObj.id);
+    fs.renameSync(file.path, finalPath);
+
+    res.json(savedObj);
   } catch (error) {
-    if (req.files) {
-      for (const f of req.files as Express.Multer.File[]) { try { fs.unlinkSync(f.path); } catch (e) {} }
-    }
-    res.status(500).json({ error: 'Error uploading files' });
+    if (req.file) { try { fs.unlinkSync(req.file.path); } catch (e) {} }
+    res.status(500).json({ error: 'Error uploading file' });
   }
 });
+
 
 // Download/View (Pode ser público se o bucket for público)
 router.get('/:objectId', async (req, res) => {
