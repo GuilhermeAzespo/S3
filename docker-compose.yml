@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  s3-app:
+    build: .
+    container_name: s3-app
+    ports:
+      - "3000:3000"
+    volumes:
+      - s3-data:/app/storage
+    restart: unless-stopped
+    environment:
+      - PORT=3000
+      - DATABASE_URL=file:/app/storage/s3.db
+      - STORAGE_PATH=/app/storage
+      - JWT_SECRET=supersecretjwtkey_change_me
+      - FRONTEND_PATH=/app/frontend/dist
+
+volumes:
+  s3-data:

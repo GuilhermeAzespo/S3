@@ -1,0 +1,50 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "linux-musl"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id       String @id @default(uuid())
+  username String @unique
+  password String
+  role     String @default("ADMIN") // ADMIN or USER
+}
+
+model Bucket {
+  id           String   @id @default(uuid())
+  name         String   @unique
+  quotaBytes   BigInt?  // in bytes. null means unlimited
+  isPublic     Boolean  @default(false)
+  versioning   Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  objects      Object[]
+}
+
+model Object {
+  id           String   @id @default(uuid())
+  key          String   // e.g., "folder/file.jpg"
+  bucketId     String
+  sizeBytes    Int
+  mimeType     String
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime? // Set by lifecycle rule
+
+  bucket       Bucket   @relation(fields: [bucketId], references: [id], onDelete: Cascade)
+
+  @@unique([bucketId, key])
+}
+
+model LifecycleRule {
+  id           String   @id @default(uuid())
+  bucketId     String
+  prefix       String   @default("") // apply to all or specific folder
+  daysToLive   Int      // number of days before deletion
+  createdAt    DateTime @default(now())
+}
