@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
-import { Plus, Search, Trash2, X, HardDrive, Clock } from 'lucide-react';
+import { Plus, Search, Trash2, X, HardDrive, Clock, AlertTriangle, Loader2 } from 'lucide-react';
 import { format } from 'date-fns';
 
 interface CreateModalState {
@@ -24,21 +24,27 @@ const initialModal: CreateModalState = {
 
 export default function Buckets() {
   const navigate = useNavigate();
-  const [buckets, setBuckets] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [buckets,   setBuckets]   = useState<any[]>([]);
+  const [loading,   setLoading]   = useState(true);
   const [showModal, setShowModal] = useState(false);
-  const [form, setForm] = useState<CreateModalState>(initialModal);
-  const [creating, setCreating] = useState(false);
-  const [error, setError] = useState('');
+  const [form,      setForm]      = useState<CreateModalState>(initialModal);
+  const [creating,  setCreating]  = useState(false);
+  const [error,     setError]     = useState('');
+  const [search,    setSearch]    = useState('');
 
-  useEffect(() => {
-    fetchBuckets();
-  }, []);
+  // Seleção e exclusão
+  const [selected,     setSelected]     = useState<Set<string>>(new Set());
+  const [deleteModal,  setDeleteModal]  = useState<{
+    open: boolean; objectCount: number; force: boolean; deleting: boolean;
+  }>({ open: false, objectCount: 0, force: false, deleting: false });
+
+  const baseUrl = import.meta.env.VITE_API_URL || '';
+  const token   = localStorage.getItem('token');
+
+  useEffect(() => { fetchBuckets(); }, []);
 
   const fetchBuckets = async () => {
     try {
-      const baseUrl = import.meta.env.VITE_API_URL || '';
-      const token = localStorage.getItem('token');
       const res = await axios.get(`${baseUrl}/api/buckets`, {
         headers: { Authorization: `Bearer ${token}` }
       });
@@ -56,6 +62,51 @@ export default function Buckets() {
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+  };
+
+  // ── Checkbox ──────────────────────────────────────────────────────────────
+  const toggleOne = (id: string) => setSelected(s => {
+    const n = new Set(s);
+    n.has(id) ? n.delete(id) : n.add(id);
+    return n;
+  });
+  const toggleAll = () => setSelected(s =>
+    s.size === filteredBuckets.length
+      ? new Set()
+      : new Set(filteredBuckets.map((b: any) => b.id))
+  );
+
+  // ── Exclusão ──────────────────────────────────────────────────────────────
+  const startDelete = async () => {
+    if (selected.size === 0) return;
+    // Verificar se algum dos selecionados tem arquivos (primeiro selecionado basta para o aviso)
+    // O backend vai retornar 409 se tiver arquivos
+    setDeleteModal({ open: true, objectCount: 0, force: false, deleting: false });
+  };
+
+  const confirmDelete = async (force: boolean) => {
+    setDeleteModal(s => ({ ...s, deleting: true }));
+    const ids = Array.from(selected);
+    for (const id of ids) {
+      try {
+        await axios.delete(`${baseUrl}/api/buckets/${id}${force ? '?force=true' : ''}`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+      } catch (err: any) {
+        if (err.response?.status === 409 && !force) {
+          // Tem arquivos — mostrar aviso com contagem total
+          const total = ids.reduce((acc, bid) => {
+            const b = buckets.find((x: any) => x.id === bid);
+            return acc + (b?.objectCount || 0);
+          }, 0);
+          setDeleteModal({ open: true, objectCount: total, force: true, deleting: false });
+          return;
+        }
+      }
+    }
+    setSelected(new Set());
+    setDeleteModal({ open: false, objectCount: 0, force: false, deleting: false });
+    fetchBuckets();
   };
 
   const openModal = () => {
@@ -76,9 +127,6 @@ export default function Buckets() {
     setCreating(true);
     setError('');
     try {
-      const baseUrl = import.meta.env.VITE_API_URL || '';
-      const token = localStorage.getItem('token');
-
       // Convert quota to bytes
       let quotaBytes: number | null = null;
       if (form.quotaEnabled && form.quotaValue) {
@@ -93,7 +141,6 @@ export default function Buckets() {
         { headers: { Authorization: `Bearer ${token}` } }
       );
 
-      // Create lifecycle rule for retention if enabled
       if (form.retentionEnabled && form.retentionDays) {
         const days = parseInt(form.retentionDays);
         if (days > 0) {
@@ -114,6 +161,10 @@ export default function Buckets() {
     }
   };
 
+  const filteredBuckets = buckets.filter(b =>
+    b.name.toLowerCase().includes(search.toLowerCase())
+  );
+
   return (
     <div className="space-y-4">
       {/* Top Actions */}
@@ -122,8 +173,11 @@ export default function Buckets() {
           <button className="px-4 py-2 bg-[#2d2d35] hover:bg-[#3a3a44] text-gray-300 rounded-md text-sm transition-colors flex items-center gap-2">
             Regras de Ciclo de Vida
           </button>
-          <button className="px-4 py-2 bg-[#2d2d35] hover:bg-[#3a3a44] text-gray-300 rounded-md text-sm transition-colors flex items-center gap-2">
-            <Trash2 size={16} /> Excluir
+          <button
+            onClick={startDelete}
+            disabled={selected.size === 0}
+            className="px-4 py-2 bg-[#2d2d35] hover:bg-red-700 disabled:opacity-30 disabled:cursor-not-allowed text-gray-300 hover:text-white rounded-md text-sm transition-colors flex items-center gap-2">
+            <Trash2 size={16} /> Excluir{selected.size > 0 ? ` (${selected.size})` : ''}
           </button>
         </div>
 
@@ -133,6 +187,8 @@ export default function Buckets() {
             <input
               type="text"
               placeholder="Pesquisar"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
               className="bg-[#2d2d35] border-none text-sm text-white rounded-md pl-10 pr-4 py-2 focus:ring-1 focus:ring-eveo-red outline-none"
             />
           </div>
@@ -150,7 +206,12 @@ export default function Buckets() {
         <table className="w-full text-left border-collapse">
           <thead>
             <tr className="bg-eveo-red text-white text-sm">
-              <th className="p-4 w-12"><input type="checkbox" className="rounded bg-black border-none" /></th>
+              <th className="p-4 w-12">
+                <input type="checkbox"
+                  className="rounded bg-black border-none cursor-pointer"
+                  checked={selected.size > 0 && selected.size === filteredBuckets.length}
+                  onChange={toggleAll} />
+              </th>
               <th className="p-4 font-medium">Nome</th>
               <th className="p-4 font-medium">Cota do Bucket</th>
               <th className="p-4 font-medium">Criado</th>
@@ -158,9 +219,13 @@ export default function Buckets() {
             </tr>
           </thead>
           <tbody className="text-sm">
-            {buckets.map((b, index) => (
-              <tr key={b.id} className={`border-t border-[#3a3a44] ${index % 2 === 0 ? 'bg-[#2a2f3a]' : 'bg-[#2f3542]'}`}>
-                <td className="p-4"><input type="checkbox" className="rounded bg-black border-none" /></td>
+            {filteredBuckets.map((b, index) => (
+              <tr key={b.id} className={`border-t border-[#3a3a44] ${index % 2 === 0 ? 'bg-[#2a2f3a]' : 'bg-[#2f3542]'} ${selected.has(b.id) ? 'bg-red-900/10' : ''}`}>
+                <td className="p-4">
+                  <input type="checkbox" className="rounded bg-black border-none cursor-pointer"
+                    checked={selected.has(b.id)}
+                    onChange={() => toggleOne(b.id)} />
+                </td>
                 <td className="p-4 font-medium text-white">{b.name}</td>
                 <td className="p-4">
                   <div className="text-white font-medium">
@@ -188,7 +253,7 @@ export default function Buckets() {
                 </td>
               </tr>
             ))}
-            {buckets.length === 0 && !loading && (
+            {filteredBuckets.length === 0 && !loading && (
               <tr>
                 <td colSpan={5} className="p-8 text-center text-gray-400">Nenhum bucket encontrado.</td>
               </tr>
@@ -196,6 +261,53 @@ export default function Buckets() {
           </tbody>
         </table>
       </div>
+
+      {/* Modal de Confirmação de Exclusão */}
+      {deleteModal.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="bg-[#1e2330] border border-[#3a3a44] rounded-2xl w-full max-w-sm p-6 shadow-2xl">
+            <div className="flex items-start gap-4 mb-5">
+              <div className="p-2 bg-red-500/15 rounded-lg shrink-0">
+                <AlertTriangle size={22} className="text-red-400" />
+              </div>
+              <div>
+                <h2 className="text-white text-base font-semibold mb-1">
+                  {deleteModal.objectCount > 0
+                    ? 'Bucket contém arquivos'
+                    : `Excluir ${selected.size} bucket(s)?`}
+                </h2>
+                {deleteModal.objectCount > 0 ? (
+                  <p className="text-gray-400 text-sm">
+                    Os <span className="text-white font-semibold">{deleteModal.objectCount} arquivo(s)</span> dentro
+                    {selected.size > 1 ? ' desses buckets' : ' deste bucket'} serão
+                    <span className="text-red-400 font-semibold"> permanentemente excluídos</span>. Esta ação não pode ser desfeita.
+                  </p>
+                ) : (
+                  <p className="text-gray-400 text-sm">
+                    Os buckets selecionados serão permanentemente excluídos. Esta ação não pode ser desfeita.
+                  </p>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setDeleteModal({ open: false, objectCount: 0, force: false, deleting: false })}
+                disabled={deleteModal.deleting}
+                className="flex-1 px-4 py-2.5 bg-[#2a2f3a] hover:bg-[#3a3a44] text-gray-300 rounded-lg text-sm font-medium transition-colors disabled:opacity-50">
+                Cancelar
+              </button>
+              <button
+                onClick={() => confirmDelete(deleteModal.force || deleteModal.objectCount === 0)}
+                disabled={deleteModal.deleting}
+                className="flex-1 px-4 py-2.5 bg-red-700 hover:bg-red-600 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
+                {deleteModal.deleting
+                  ? <><Loader2 size={15} className="animate-spin" /> Excluindo…</>
+                  : deleteModal.objectCount > 0 ? 'Excluir tudo' : 'Confirmar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Create Bucket Modal */}
       {showModal && (

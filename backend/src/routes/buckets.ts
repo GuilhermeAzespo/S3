@@ -71,7 +71,43 @@ router.put('/:id', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   try {
-    await prisma.bucket.delete({ where: { id: req.params.id } });
+    const { id } = req.params;
+    const force = req.query.force === 'true'; // ?force=true para excluir mesmo com arquivos
+
+    // Contar objetos dentro do bucket
+    const objectCount = await prisma.object.count({ where: { bucketId: id } });
+
+    if (objectCount > 0 && !force) {
+      return res.status(409).json({
+        error: 'Bucket não está vazio',
+        objectCount,
+        message: `Este bucket contém ${objectCount} arquivo(s). Confirme para excluir tudo.`
+      });
+    }
+
+    // Se force=true ou bucket vazio: deletar arquivos do disco + registros
+    if (objectCount > 0) {
+      const objects = await prisma.object.findMany({ where: { bucketId: id }, select: { id: true } });
+      const storagePath = process.env.STORAGE_PATH || require('path').join(__dirname, '../../../storage');
+      const fs = require('fs');
+      for (const obj of objects) {
+        const filePath = require('path').join(storagePath, id, obj.id);
+        if (fs.existsSync(filePath)) { try { fs.unlinkSync(filePath); } catch (e) {} }
+      }
+      await prisma.object.deleteMany({ where: { bucketId: id } });
+    }
+
+    // Deletar lifecycle rules e o bucket
+    await prisma.lifecycleRule.deleteMany({ where: { bucketId: id } });
+    await prisma.bucket.delete({ where: { id } });
+
+    // Remover pasta do bucket no disco
+    try {
+      const storagePath = process.env.STORAGE_PATH || require('path').join(__dirname, '../../../storage');
+      const bucketDir = require('path').join(storagePath, id);
+      if (require('fs').existsSync(bucketDir)) require('fs').rmdirSync(bucketDir, { recursive: true });
+    } catch (e) {}
+
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Error deleting bucket' });
