@@ -42,79 +42,78 @@ router.get('/bucket/:bucketId', requireAuth, async (req, res) => {
   }
 });
 
-// Upload de objeto
-router.post('/bucket/:bucketId/upload', requireAuth, upload.single('file'), async (req, res) => {
+// Upload de múltiplos objetos (arquivos e pastas)
+router.post('/bucket/:bucketId/upload', requireAuth, upload.array('files', 500), async (req, res) => {
   try {
     const { bucketId } = req.params;
-    const { key } = req.body; // Path no S3, ex: "images/foto.jpg"
-    const file = req.file;
-
-    if (!file || !key) {
-      return res.status(400).json({ error: 'File and key are required' });
+    const files = req.files as Express.Multer.File[];
+    // keys enviados pelo frontend como JSON array ou campo repetido
+    let keys: string[] = [];
+    if (req.body.keys) {
+      keys = Array.isArray(req.body.keys) ? req.body.keys : JSON.parse(req.body.keys);
     }
 
-    // Verificar Cota
+    if (!files || files.length === 0) {
+      return res.status(400).json({ error: 'No files provided' });
+    }
+
+    // Verificar Cota global do bucket
     const bucket = await prisma.bucket.findUnique({ where: { id: bucketId } });
     if (!bucket) {
-      fs.unlinkSync(file.path);
+      for (const f of files) { try { fs.unlinkSync(f.path); } catch (e) {} }
       return res.status(404).json({ error: 'Bucket not found' });
     }
 
     if (bucket.quotaBytes) {
-      const agg = await prisma.object.aggregate({
-        where: { bucketId },
-        _sum: { sizeBytes: true }
-      });
-      const currentSize = agg._sum.sizeBytes || 0;
-      if (currentSize + file.size > Number(bucket.quotaBytes)) {
-        fs.unlinkSync(file.path);
+      const agg = await prisma.object.aggregate({ where: { bucketId }, _sum: { sizeBytes: true } });
+      const currentSize = Number(agg._sum.sizeBytes) || 0;
+      const uploadSize = files.reduce((acc, f) => acc + f.size, 0);
+      if (currentSize + uploadSize > Number(bucket.quotaBytes)) {
+        for (const f of files) { try { fs.unlinkSync(f.path); } catch (e) {} }
         return res.status(400).json({ error: 'Bucket quota exceeded' });
       }
     }
 
     // Verificar Regras de Lifecycle
     const rules = await prisma.lifecycleRule.findMany({ where: { bucketId } });
-    let expiresAt: Date | null = null;
-    
-    for (const rule of rules) {
-      if (!rule.prefix || key.startsWith(rule.prefix)) {
-        expiresAt = new Date();
-        expiresAt.setDate(expiresAt.getDate() + rule.daysToLive);
-        break; // Aplica a primeira regra correspondente
+
+    const saved = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const key  = keys[i] || file.originalname;
+
+      let expiresAt: Date | null = null;
+      for (const rule of rules) {
+        if (!rule.prefix || key.startsWith(rule.prefix)) {
+          expiresAt = new Date();
+          expiresAt.setDate(expiresAt.getDate() + rule.daysToLive);
+          break;
+        }
       }
+
+      // Substituir se já existe
+      const existing = await prisma.object.findUnique({ where: { bucketId_key: { bucketId, key } } });
+      if (existing) {
+        const oldPath = path.join(STORAGE_PATH, bucketId, existing.id);
+        if (fs.existsSync(oldPath)) { try { fs.unlinkSync(oldPath); } catch (e) {} }
+        await prisma.object.delete({ where: { id: existing.id } });
+      }
+
+      const savedObj = await prisma.object.create({
+        data: { bucketId, key, sizeBytes: file.size, mimeType: file.mimetype, expiresAt }
+      });
+
+      const finalPath = path.join(STORAGE_PATH, bucketId, savedObj.id);
+      fs.renameSync(file.path, finalPath);
+      saved.push(savedObj);
     }
 
-    // Salvar ou atualizar no banco
-    const existing = await prisma.object.findUnique({ where: { bucketId_key: { bucketId, key } } });
-    let savedObj;
-    
-    if (existing) {
-      // Deletar arquivo antigo do disco
-      const oldFilePath = path.join(STORAGE_PATH, bucketId, existing.id);
-      if (fs.existsSync(oldFilePath)) {
-        try { fs.unlinkSync(oldFilePath); } catch (e) {}
-      }
-      await prisma.object.delete({ where: { id: existing.id } });
-    }
-
-    savedObj = await prisma.object.create({
-      data: {
-        bucketId,
-        key,
-        sizeBytes: file.size,
-        mimeType: file.mimetype,
-        expiresAt
-      }
-    });
-
-    // Renomear o arquivo para usar o ID do objeto no disco (mais seguro para rotas e sem espaços)
-    const finalPath = path.join(STORAGE_PATH, bucketId, savedObj.id);
-    fs.renameSync(file.path, finalPath);
-
-    res.json(savedObj);
+    res.json(saved);
   } catch (error) {
-    if (req.file) { try { fs.unlinkSync(req.file.path); } catch(e) {} }
-    res.status(500).json({ error: 'Error uploading file' });
+    if (req.files) {
+      for (const f of req.files as Express.Multer.File[]) { try { fs.unlinkSync(f.path); } catch (e) {} }
+    }
+    res.status(500).json({ error: 'Error uploading files' });
   }
 });
 
