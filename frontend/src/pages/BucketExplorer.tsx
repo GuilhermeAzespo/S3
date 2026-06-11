@@ -41,7 +41,8 @@ async function uploadBatch(
   token: string,
   bucketId: string,
   items: Array<{ file: File; key: string }>,
-  onProgress: (done: number) => void
+  onProgress: (done: number) => void,
+  onBatchDone?: () => void        // callback após cada lote (para refresh do storage)
 ): Promise<{ ok: number; fail: number }> {
   let ok = 0; let fail = 0;
 
@@ -59,6 +60,7 @@ async function uploadBatch(
       } catch { fail++; }
     }));
     onProgress(ok + fail);
+    onBatchDone?.();              // atualiza storage no header após cada lote
   }
   return { ok, fail };
 }
@@ -77,6 +79,8 @@ export default function BucketExplorer() {
   const [prefix,      setPrefix]      = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [loading,     setLoading]     = useState(true);
+  const [isReading,   setIsReading]   = useState(false); // browser lendo arquivos da pasta
+  const folderDialogOpen              = useRef(false);
 
   // progresso do upload
   const [uploadState, setUploadState] = useState<{
@@ -97,6 +101,15 @@ export default function BucketExplorer() {
   const baseUrl = import.meta.env.VITE_API_URL || '';
 
   // ── fetch ──────────────────────────────────────────────────────────────────
+  /** Atualiza apenas os dados do bucket (storage) sem recarregar objetos */
+  const fetchBucket = useCallback(async () => {
+    if (!bucketId) return;
+    try {
+      const br = await axios.get(`${baseUrl}/api/buckets`, { headers: { Authorization: `Bearer ${token}` } });
+      setBucket(br.data.find((b: any) => b.id === bucketId) ?? null);
+    } catch (e) { console.error(e); }
+  }, [bucketId, baseUrl, token]);
+
   const fetchAll = useCallback(async () => {
     if (!bucketId) return;
     setLoading(true);
@@ -113,9 +126,25 @@ export default function BucketExplorer() {
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
+  // Detecta quando o dialog de pasta fecha mas o browser ainda está lendo os arquivos
+  useEffect(() => {
+    const onFocus = () => {
+      if (folderDialogOpen.current) {
+        folderDialogOpen.current = false;
+        // Pequeno delay: se onChange não disparar em 500ms, assume que o user cancelou
+        // Se disparar, setIsReading(false) será chamado pelo onChange
+        setIsReading(true);
+        setTimeout(() => setIsReading(r => r ? false : r), 3000);
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
+
   // ── upload ─────────────────────────────────────────────────────────────────
   const doUpload = async (fileList: FileList, isFolder: boolean) => {
     if (!fileList.length || !bucketId) return;
+    setIsReading(false); // browser terminou de ler, começa o upload
 
     const items: Array<{ file: File; key: string }> = [];
     for (let i = 0; i < fileList.length; i++) {
@@ -127,15 +156,18 @@ export default function BucketExplorer() {
 
     setUploadState({ active: true, total: items.length, done: 0, label: `Enviando 0 / ${items.length}` });
 
-    const { ok, fail } = await uploadBatch(baseUrl, token, bucketId, items, (done) => {
-      setUploadState(s => ({ ...s, done, label: `Enviando ${done} / ${items.length}` }));
-    });
+    const { ok, fail } = await uploadBatch(
+      baseUrl, token, bucketId, items,
+      (done) => {
+        setUploadState(s => ({ ...s, done, label: `Enviando ${done} / ${items.length}` }));
+      },
+      fetchBucket  // ← atualiza o uso de armazenamento no header a cada lote
+    );
 
     setUploadState({ active: false, total: 0, done: 0, label: '' });
 
     if (fail === 0) {
       showToast('success', `${ok} arquivo(s) enviado(s) com sucesso!`);
-      // navegar para dentro da pasta se veio de folder upload
       if (isFolder && items.length > 0) {
         const firstRel = (items[0].file as any).webkitRelativePath as string;
         if (firstRel) {
@@ -218,20 +250,26 @@ export default function BucketExplorer() {
         </div>
       )}
 
-      {/* ── Barra de progresso global ── */}
-      {uploadState.active && (
+      {/* ── Barra de progresso / lendo pasta ── */}
+      {(uploadState.active || isReading) && (
         <div className="fixed top-5 right-5 z-[9999] bg-[#1e2330] border border-[#3a3a44] rounded-xl px-5 py-3 shadow-2xl text-sm text-white"
           style={{ minWidth: 280 }}>
           <div className="flex items-center gap-3 mb-2">
             <Loader2 size={16} className="animate-spin text-eveo-red shrink-0" />
-            <span>{uploadState.label}</span>
+            <span>
+              {isReading
+                ? 'Lendo arquivos da pasta…'
+                : uploadState.label}
+            </span>
           </div>
-          <div className="w-full bg-gray-700 h-2 rounded-full overflow-hidden">
-            <div
-              className="bg-eveo-red h-2 rounded-full transition-all"
-              style={{ width: `${uploadState.total ? (uploadState.done / uploadState.total) * 100 : 0}%` }}
-            />
-          </div>
+          {!isReading && (
+            <div className="w-full bg-gray-700 h-2 rounded-full overflow-hidden">
+              <div
+                className="bg-eveo-red h-2 rounded-full transition-all"
+                style={{ width: `${uploadState.total ? (uploadState.done / uploadState.total) * 100 : 0}%` }}
+              />
+            </div>
+          )}
         </div>
       )}
 
@@ -287,14 +325,19 @@ export default function BucketExplorer() {
           webkitdirectory="true" directory="true" />
 
         <div className="flex gap-2 w-full md:w-auto justify-end">
-          <button onClick={() => folderInputRef.current?.click()} disabled={uploadState.active}
+          <button
+            onClick={() => { folderDialogOpen.current = true; folderInputRef.current?.click(); }}
+            disabled={uploadState.active || isReading}
             className="px-4 py-2.5 bg-[#2d2d35] hover:bg-[#3a3a44] disabled:opacity-40 text-gray-200 font-medium rounded-md text-sm transition-colors flex items-center gap-2">
-            <Folder size={16} /> Upload de Pasta
+            {isReading
+              ? <><Loader2 size={16} className="animate-spin" /> Lendo pasta…</>
+              : <><Folder size={16} /> Upload de Pasta</>}
           </button>
-          <button onClick={() => fileInputRef.current?.click()} disabled={uploadState.active}
+          <button onClick={() => fileInputRef.current?.click()} disabled={uploadState.active || isReading}
             className="px-5 py-2.5 bg-eveo-red hover:bg-eveo-redHover disabled:bg-red-900 text-white font-medium rounded-md text-sm transition-colors flex items-center gap-2">
-            <Upload size={16} />
-            {uploadState.active ? 'Enviando…' : 'Upload de Arquivo'}
+            {uploadState.active
+              ? <><Loader2 size={16} className="animate-spin" /> Enviando…</>
+              : <><Upload size={16} /> Upload de Arquivo</>}
           </button>
         </div>
       </div>
