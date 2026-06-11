@@ -9,6 +9,7 @@ import authRoutes from './routes/auth';
 import bucketRoutes from './routes/buckets';
 import objectRoutes from './routes/objects';
 import lifecycleRoutes from './routes/lifecycle';
+import statsRoutes from './routes/stats';
 import { startLifecycleCron } from './cron/lifecycleJob';
 import { prisma } from './prismaClient';
 
@@ -32,6 +33,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/buckets', bucketRoutes);
 app.use('/api/objects', objectRoutes);
 app.use('/api/lifecycle', lifecycleRoutes);
+app.use('/api/stats', statsRoutes);
 
 // Servir frontend em produção
 const frontendPath = process.env.FRONTEND_PATH || path.join(__dirname, '../../frontend/dist');
